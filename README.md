@@ -21,11 +21,11 @@ An Android phone is a great environment for running an OpenClaw server:
 
 ## No Linux install required
 
-The standard approach to running OpenClaw on Android requires installing proot-distro with Linux, adding 700MB-1GB of overhead. OpenClaw on Android eliminates this by patching compatibility issues directly, letting you run OpenClaw in pure Termux.
+The standard approach to running OpenClaw on Android requires installing proot-distro with Linux, adding 700MB-1GB of overhead. OpenClaw on Android eliminates this by installing a lightweight glibc runtime directly into Termux, letting you run OpenClaw without a full Linux distribution.
 
 | | Standard (proot-distro) | This project |
 |---|---|---|
-| Storage overhead | 1-2GB (Linux + packages) | ~50MB |
+| Storage overhead | 1-2GB (Linux + packages) | ~200MB |
 | Setup time | 20-30 min | 3-10 min |
 | Performance | Slower (proot layer) | Native speed |
 | Setup steps | Install distro, configure Linux, install Node.js, fix paths... | Run one command |
@@ -33,7 +33,7 @@ The standard approach to running OpenClaw on Android requires installing proot-d
 ## Requirements
 
 - Android 7.0 or higher (Android 10+ recommended)
-- ~500MB free storage
+- ~1GB free storage
 - Wi-Fi or mobile data connection
 
 ## Step-by-Step Setup (from a fresh phone)
@@ -191,6 +191,9 @@ After installation, the `oa` command is available for managing your installation
 | `oa ide` | Start code-server (browser IDE) |
 | `oa ide --stop` | Stop code-server |
 | `oa ide --status` | Check if code-server is running |
+| `oa opencode` | Start OpenCode |
+| `oa opencode --stop` | Stop OpenCode |
+| `oa opencode --status` | Check OpenCode status |
 | `oa --update` | Update OpenClaw and Android patches |
 | `oa --uninstall` | Remove OpenClaw on Android |
 | `oa --status` | Show installation status and diagnostics |
@@ -224,13 +227,14 @@ See the [Troubleshooting Guide](docs/troubleshooting.md) for detailed solutions.
 
 ## What It Does
 
-The installer automatically resolves the differences between Termux and standard Linux. There's nothing you need to do manually — the single install command handles all 5 of these:
+The installer automatically resolves the differences between Termux and standard Linux. There's nothing you need to do manually — the single install command handles all of these:
 
-1. **Platform recognition** — Configures Android to be recognized as Linux
-2. **Network error prevention** — Automatically works around network-related crashes on Android
-3. **Path conversion** — Automatically converts standard Linux paths to Termux paths
-4. **Temp folder setup** — Automatically configures an accessible temp folder for Android
+1. **glibc environment** — Installs a glibc runtime (via pacman's glibc-runner) so standard Linux binaries run without modification
+2. **Node.js (glibc)** — Downloads official Node.js linux-arm64 and wraps it with an ld.so loader script (no patchelf, which causes segfault on Android)
+3. **Path conversion** — Automatically converts standard Linux paths (`/tmp`, `/bin/sh`, `/usr/bin/env`) to Termux paths
+4. **Temp folder setup** — Configures an accessible temp folder for Android
 5. **Service manager bypass** — Configures normal operation without systemd
+6. **OpenCode integration** — Installs OpenCode + oh-my-opencode using proot + ld.so concatenation for Bun standalone binaries
 
 ## Performance
 
@@ -252,9 +256,7 @@ openclaw-android/
 ├── update-core.sh              # Lightweight updater for existing installations
 ├── uninstall.sh                # Clean removal
 ├── patches/
-│   ├── bionic-compat.js        # Platform override + os.networkInterfaces() + os.cpus() patches
-│   ├── termux-compat.h         # C/C++ compatibility shim (renameat2 syscall wrapper)
-│   ├── spawn.h                 # POSIX spawn stub header for Termux
+│   ├── glibc-compat.js        # Node.js runtime patches (os.cpus, networkInterfaces)
 │   ├── argon2-stub.js          # JS stub for argon2 native module (code-server)
 │   ├── patch-paths.sh          # Fix hardcoded paths in OpenClaw
 │   └── apply-patches.sh        # Patch orchestrator
@@ -263,6 +265,8 @@ openclaw-android/
 │   ├── check-env.sh            # Pre-flight environment check
 │   ├── install-code-server.sh  # Install/update code-server (browser IDE)
 │   ├── install-deps.sh         # Install Termux packages
+│   ├── install-glibc-env.sh    # Install glibc environment (glibc-runner + Node.js)
+│   ├── install-opencode.sh     # Install OpenCode + oh-my-opencode
 │   ├── setup-env.sh            # Configure environment variables
 │   └── setup-paths.sh          # Create directories and symlinks
 ├── tests/
@@ -277,20 +281,20 @@ openclaw-android/
 
 ## Detailed Installation Flow
 
-Running `bash install.sh` executes the following 8 steps in order.
+Running `bash install.sh` executes the following 10 steps in order.
 
-### [1/8] Environment Check — `scripts/check-env.sh`
+### [1/10] Environment Check — `scripts/check-env.sh`
 
 Validates that the current environment is suitable before starting installation.
 
 - **Termux detection**: Checks for the `$PREFIX` environment variable. Exits immediately if not in Termux
 - **Architecture check**: Runs `uname -m` to verify CPU architecture (aarch64 recommended, armv7l supported, x86_64 treated as emulator)
-- **Disk space**: Ensures at least 500MB free on the `$PREFIX` partition. Errors if insufficient
+- **Disk space**: Ensures at least 1000MB free on the `$PREFIX` partition. Errors if insufficient
 - **Existing installation**: If `openclaw` command already exists, shows current version and notes this is a reinstall/upgrade
 - **Node.js pre-check**: If Node.js is already installed, shows version and warns if below 22
 - **Phantom Process Killer** (Android 12+): Reads `settings_enable_monitor_phantom_procs` via `getprop`/`settings`. If active, warns that background processes may be killed and shows ADB commands to disable it
 
-### [2/8] Package Installation — `scripts/install-deps.sh`
+### [2/10] Base Dependencies — `scripts/install-deps.sh`
 
 Installs Termux packages required for building and running OpenClaw.
 
@@ -299,22 +303,32 @@ Installs Termux packages required for building and running OpenClaw.
 
 | Package | Role | Why It's Needed |
 |---------|------|-----------------|
-| `nodejs-lts` | Node.js LTS runtime (>= 22) + npm package manager | OpenClaw is a Node.js application. Node.js and npm are required to install it via `npm install -g openclaw`. LTS is used because OpenClaw requires Node >= 22.12.0 |
-| `git` | Distributed version control | Some npm packages have git dependencies. Sub-dependencies of OpenClaw may reference packages via git URLs. Also needed if installing this repo via `git clone` |
-| `python` | Python interpreter | Used by `node-gyp` to run build scripts when compiling native C/C++ addons. Required when OpenClaw's dependency tree includes native modules (e.g., `better-sqlite3`, `bcrypt`) |
-| `make` | Build automation tool | Executes Makefiles generated by `node-gyp` to compile native modules. Core part of the native build pipeline alongside `python` |
-| `cmake` | Cross-platform build system | Some native modules use CMake-based builds instead of Makefiles. Cryptography-related libraries (`argon2`, etc.) often include CMakeLists.txt |
-| `clang` | C/C++ compiler | Default C/C++ compiler in Termux. Used by `node-gyp` to compile C/C++ source of native modules. Termux uses Clang as standard instead of GCC |
-| `binutils` | Binary utilities (ar, strip, etc.) | Provides `llvm-ar` for creating static archives during native module builds. The installer also creates an `ar → llvm-ar` symlink since many build systems expect a plain `ar` command |
-| `tmux` | Terminal multiplexer | Allows running the OpenClaw server in a background session. In Termux, apps going to background may suspend processes, so running inside a tmux session keeps it stable |
-| `ttyd` | Web terminal | Shares a terminal over the web. Used by [My OpenClaw Hub](https://myopenclawhub.com) to provide browser-based terminal access to the host |
-| `dufs` | HTTP/WebDAV file server | Provides file upload/download via browser. Used by [My OpenClaw Hub](https://myopenclawhub.com) for file management on the host |
-| `android-tools` | Android Debug Bridge (adb) | Used to disable Android's Phantom Process Killer from within Termux. Without this, Android 12+ may kill background processes (openclaw, sshd, etc.) via SIGKILL |
-| `pyyaml` (pip) | YAML parser for Python | Required for `.skill` packaging in OpenClaw. Installed via `pip install pyyaml` after the Termux packages |
+| `git` | Distributed version control | Some npm packages have git dependencies. Also needed if installing this repo via `git clone` |
+| `python` | Python interpreter | Used by `node-gyp` to run build scripts when compiling native C/C++ addons |
+| `make` | Build automation tool | Executes Makefiles generated by `node-gyp` to compile native modules |
+| `cmake` | Cross-platform build system | Some native modules use CMake-based builds instead of Makefiles |
+| `clang` | C/C++ compiler | Default C/C++ compiler in Termux. Used by `node-gyp` to compile native modules |
+| `binutils` | Binary utilities (ar, strip, etc.) | Provides `llvm-ar` for creating static archives during native module builds |
+| `tmux` | Terminal multiplexer | Allows running the OpenClaw server in a background session |
+| `ttyd` | Web terminal | Shares a terminal over the web for browser-based terminal access |
+| `dufs` | HTTP/WebDAV file server | Provides file upload/download via browser |
+| `android-tools` | Android Debug Bridge (adb) | Used to disable Android's Phantom Process Killer from within Termux |
+| `pyyaml` (pip) | YAML parser for Python | Required for `.skill` packaging in OpenClaw |
 
-- After installation, verifies Node.js >= 22 and npm presence. Exits on failure
+Note: Node.js is **not** installed here — it is installed as a glibc linux-arm64 binary in the next step.
 
-### [3/8] Path Setup — `scripts/setup-paths.sh`
+### [3/10] glibc Environment — `scripts/install-glibc-env.sh`
+
+Installs the glibc runtime environment that allows standard Linux binaries to run on Android.
+
+1. Installs `pacman` and `proot` Termux packages
+2. Initializes pacman and installs `glibc-runner` from Termux's pacman repos (provides glibc dynamic linker at `$PREFIX/glibc/lib/ld-linux-aarch64.so.1`)
+3. Downloads official Node.js v22 LTS (linux-arm64) from nodejs.org
+4. Creates grun-style wrapper scripts: `node` becomes a bash script that runs `ld.so node.real "$@"` (no patchelf — it causes segfault on Android due to seccomp)
+5. Configures npm and verifies everything works
+6. Creates `.glibc-arch` marker file to identify the architecture
+
+### [4/10] Path Setup — `scripts/setup-paths.sh`
 
 Creates the directory structure needed for Termux.
 
@@ -323,54 +337,38 @@ Creates the directory structure needed for Termux.
 - `$HOME/.openclaw` — OpenClaw data directory
 - Displays how standard Linux paths (`/bin/sh`, `/usr/bin/env`, `/tmp`) map to Termux's `$PREFIX` subdirectories
 
-### [4/8] Environment Variables — `scripts/setup-env.sh`
+### [5/10] Environment Variables — `scripts/setup-env.sh`
 
 Adds an environment variable block to `~/.bashrc`.
 
 - Wraps the block with `# >>> OpenClaw on Android >>>` / `# <<< OpenClaw on Android <<<` markers for management
 - If the block already exists, removes the old one and adds a fresh one (prevents duplicates)
 - Environment variables set:
+  - `PATH` — Prepends glibc Node.js directory (`~/.openclaw-android/node/bin`)
   - `TMPDIR=$PREFIX/tmp` — Use Termux temp directory instead of `/tmp`
   - `TMP`, `TEMP` — Same as `TMPDIR` (for compatibility with some tools)
-  - `NODE_OPTIONS="-r .../bionic-compat.js"` — Auto-load Bionic compatibility patch for all Node processes
   - `CONTAINER=1` — Bypass systemd existence checks
-  - `CFLAGS="-Wno-error=implicit-function-declaration"` — Prevent Clang from treating implicit function declarations as errors (needed for building native modules like `@discordjs/opus` that compile cleanly with GCC but fail under Clang's stricter defaults)
-  - `CXXFLAGS="-include .../termux-compat.h"` — Force-include C/C++ compatibility shim for native module builds
-  - `GYP_DEFINES="OS=linux ..."` — Override node-gyp OS detection for Android
-  - `CPATH="...glib-2.0..."` — Provide glib header paths for sharp builds
-  - `CLAWDHUB_WORKDIR="$HOME/.openclaw/workspace"` — Direct clawhub to install skills into OpenClaw's workspace instead of the default `~/skills/`
-- Creates an `ar → llvm-ar` symlink if missing (Termux provides `llvm-ar` but many build systems expect `ar`)
+  - `CLAWDHUB_WORKDIR="$HOME/.openclaw/workspace"` — Direct clawhub to install skills into OpenClaw's workspace
+  - `OA_GLIBC=1` — Marks this as a glibc-based installation
+- Creates an `ar → llvm-ar` symlink if missing
 
-After running `setup-env.sh`, `install.sh` re-exports all environment variables in the current process. Since `setup-env.sh` runs as a subprocess, its exports don't propagate to the parent. This re-export ensures Step 5's `npm install` inherits the correct build environment (CFLAGS, CXXFLAGS, GYP_DEFINES, etc.).
+The glibc architecture no longer needs `NODE_OPTIONS`, `CFLAGS`, `CXXFLAGS`, `GYP_DEFINES`, or `CPATH` — these were required for the old Bionic architecture but are unnecessary with a standard glibc environment.
 
-### [5/8] OpenClaw Installation & Patching — `npm install` + `patches/apply-patches.sh`
+### [6/10] OpenClaw Installation & Patching — `npm install` + `patches/apply-patches.sh`
 
 Installs OpenClaw globally and applies Termux compatibility patches.
 
-1. Copies compatibility patches to `~/.openclaw-android/patches/`:
-   - `bionic-compat.js` — Node.js runtime patches (needed during npm install)
-   - `termux-compat.h` — C/C++ build compatibility (renameat2 syscall wrapper)
-   - `spawn.h` → `$PREFIX/include/spawn.h` — POSIX spawn stub header (if missing)
-2. Installs `update.sh` wrapper as `$PREFIX/bin/oaupdate` for convenient updating
+1. Copies `glibc-compat.js` to `~/.openclaw-android/patches/` — provides `os.cpus()` fallback (Android kernel returns 0) and `os.networkInterfaces()` try-catch wrapper (EACCES on Android)
+2. Installs `oa.sh` as `$PREFIX/bin/oa` and `update.sh` wrapper as `$PREFIX/bin/oaupdate`
 3. Runs `npm install -g openclaw@latest`
-4. Installs `clawhub` (skill manager) globally via `npm install -g clawdhub`. On Node.js v24+ in Termux, `undici` is not bundled — if missing, it's installed directly into clawhub's directory
-5. `patches/apply-patches.sh` applies all patches:
-   - Verifies `bionic-compat.js` final copy
-   - Installs `systemctl` stub to `$PREFIX/bin/systemctl` — a minimal script that intercepts systemd service management calls (which would fail in Termux since there is no systemd)
-   - Runs `patches/patch-paths.sh` — uses sed to replace hardcoded paths in installed OpenClaw JS files:
-     - `"/tmp"` / `'/tmp'` → `"$PREFIX/tmp"` / `'$PREFIX/tmp'`
-     - `"/bin/sh"` → `"$PREFIX/bin/sh"`
-     - `"/bin/bash"` → `"$PREFIX/bin/bash"`
-     - `"/usr/bin/env"` → `"$PREFIX/bin/env"`
+4. Installs `clawhub` (skill manager) globally via `npm install -g clawdhub`
+5. `patches/apply-patches.sh` applies patches:
+   - Copies `glibc-compat.js` to the patches directory
+   - Installs `systemctl` stub to `$PREFIX/bin/systemctl`
+   - Runs `patches/patch-paths.sh` to replace hardcoded paths in OpenClaw JS files (`/tmp`, `/bin/sh`, `/bin/bash`, `/usr/bin/env`)
    - Logs patch results to `~/.openclaw-android/patch.log`
-6. `scripts/build-sharp.sh` builds the sharp native module for image processing (non-critical):
-   - Installs `libvips` and `binutils` packages
-   - Installs `node-gyp` globally
-   - Sets `GYP_DEFINES` and `CPATH` for Android/Termux cross-compilation
-   - Runs `npm rebuild sharp` inside the OpenClaw directory
-   - If the build fails, prints a warning and continues — image processing won't work but the gateway runs normally
 
-### [6/8] code-server Installation — `scripts/install-code-server.sh`
+### [7/10] code-server Installation — `scripts/install-code-server.sh`
 
 Installs code-server, a browser-based VS Code IDE, with Termux-specific workarounds. This step is non-critical — failure prints a warning but does not abort the installer.
 
@@ -392,7 +390,26 @@ Installation flow:
 
 After installation, use `oa ide` to start code-server.
 
-### [7/8] Installation Verification — `tests/verify-install.sh`
+### [8/10] OpenCode + oh-my-opencode — `scripts/install-opencode.sh`
+
+Installs OpenCode and oh-my-opencode (AI coding assistant and its plugin framework). This step is non-critical — failure prints a warning but does not abort the installer.
+
+OpenCode and oh-my-opencode are Bun standalone binaries that require special handling on Android:
+
+1. **Bun uses raw syscalls** — `LD_PRELOAD` shims don't work, so `proot` is needed to intercept syscalls
+2. **Bun reads embedded JS via `/proc/self/exe`** — The `grun` approach (which makes `/proc/self/exe` point to `ld.so`) breaks the offset calculation. The ld.so concatenation method (prepending `ld.so` to the binary) preserves the correct offsets
+
+Installation flow:
+- Creates a minimal proot rootfs at `~/.openclaw-android/proot-root/`
+- Installs Bun via the official installer
+- Uses Bun to install `opencode-ai` and `oh-my-opencode` packages
+- Creates ld.so concatenation files (`$PREFIX/tmp/ld.so.opencode`, `$PREFIX/tmp/ld.so.omo`)
+- Creates proot wrapper scripts at `$PREFIX/bin/opencode` and `$PREFIX/bin/oh-my-opencode`
+- Sets up OpenCode config with oh-my-opencode plugin
+
+After installation, use `oa opencode` to start OpenCode.
+
+### [9/10] Installation Verification — `tests/verify-install.sh`
 
 Checks the following items to confirm installation completed successfully.
 
@@ -402,36 +419,39 @@ Checks the following items to confirm installation completed successfully.
 | npm | `npm` command exists |
 | openclaw | `openclaw --version` succeeds |
 | TMPDIR | Environment variable is set |
-| NODE_OPTIONS | Environment variable is set |
 | CONTAINER | Set to `1` |
-| bionic-compat.js | File exists in `~/.openclaw-android/patches/` |
-| termux-compat.h | File exists in `~/.openclaw-android/patches/` |
-| CXXFLAGS | Environment variable is set (WARN level) |
+| OA_GLIBC | Set to `1` |
+| glibc-compat.js | File exists in `~/.openclaw-android/patches/` |
+| .glibc-arch | Marker file exists in `~/.openclaw-android/` |
+| glibc dynamic linker | `ld-linux-aarch64.so.1` exists in `$PREFIX/glibc/lib/` |
+| glibc node wrapper | Wrapper script exists at `~/.openclaw-android/node/bin/node` |
 | Directories | `~/.openclaw-android`, `~/.openclaw`, `$PREFIX/tmp` exist |
 | code-server | `code-server --version` succeeds (WARN level, non-critical) |
+| opencode | `opencode` command available (WARN level, non-critical) |
 | .bashrc | Contains environment variable block |
 
 All items pass → PASSED. Any failure → FAILED with reinstall instructions. WARN-level items do not cause failure.
 
-### [8/8] OpenClaw Update
+### [10/10] OpenClaw Update
 
 Runs `openclaw update` to ensure the latest version. On completion, displays the OpenClaw version and instructs the user to run `openclaw onboard` to start setup.
 
 ## Lightweight Updater Flow — `oa --update`
 
-Running `oa --update` (or `oaupdate` for backward compatibility) downloads `update-core.sh` from GitHub and executes the following 8 steps. Unlike the full installer, it skips environment checks, path setup, and verification — focusing only on refreshing patches, environment variables, and the OpenClaw package.
+Running `oa --update` (or `oaupdate` for backward compatibility) downloads `update-core.sh` from GitHub and executes the following 9 steps. Unlike the full installer, it skips environment checks, path setup, and verification — focusing only on refreshing patches, environment variables, and packages.
 
-### [1/8] Pre-flight Check
+### [1/9] Pre-flight Check
 
 Validates the minimum conditions for updating.
 
 - Checks `$PREFIX` exists (Termux environment)
 - Checks `openclaw` command exists (must already be installed)
 - Checks `curl` is available (needed to download files)
+- Detects architecture: glibc (`.glibc-arch` marker) or Bionic (legacy)
 - Migrates old directory name if needed (`.openclaw-lite` → `.openclaw-android` — legacy compatibility)
 - **Phantom Process Killer** (Android 12+): Same check as the full installer — warns if active and shows ADB commands to disable it
 
-### [2/8] Installing New Packages
+### [2/9] Installing New Packages
 
 Installs packages that may have been added since the user's initial installation.
 
@@ -442,57 +462,62 @@ Installs packages that may have been added since the user's initial installation
 
 All are non-critical — failures print a warning but don't stop the update.
 
-### [3/8] Downloading Latest Scripts
+### [3/9] Downloading Latest Scripts
 
 Downloads the latest patch files and scripts from GitHub.
 
 | File | Purpose | On Failure |
 |------|---------|------------|
 | `setup-env.sh` | Refresh `.bashrc` environment block | **Exit** (required) |
-| `bionic-compat.js` | Node.js runtime compatibility patch | Warning |
-| `termux-compat.h` | C/C++ build compatibility header | Warning |
+| `glibc-compat.js` | Node.js runtime compatibility patch | Warning |
 | `spawn.h` | POSIX spawn stub (skipped if exists) | Warning |
 | `argon2-stub.js` | JS stub for argon2 native module (code-server) | Warning |
 | `systemctl` | systemd stub for Termux | Warning |
 | `oa.sh` | Unified CLI (`oa` command) | Warning |
+| `install-code-server.sh` | code-server install/update script | Warning |
 | `build-sharp.sh` | sharp native module build script | Warning |
-| `install-code-server.sh` | code-server install/update script (temp file) | Warning |
+| `install-glibc-env.sh` | glibc environment installer (for migration) | Warning |
+| `install-opencode.sh` | OpenCode + oh-my-opencode installer | Warning |
 
 Only `setup-env.sh` is required — all other failures are non-critical.
 
-### [4/8] Updating Environment Variables
+### [4/9] Updating Environment Variables
 
-Runs the downloaded `setup-env.sh` to refresh the `.bashrc` environment block with the latest variables. Then re-exports all variables in the current process so that Step 5's `npm install` inherits the correct build environment.
+Runs the downloaded `setup-env.sh` to refresh the `.bashrc` environment block with the latest variables. If the installation is detected as Bionic (pre-1.0.0), the updater also performs an automatic migration to the glibc architecture — installing glibc-runner, downloading Node.js, and creating wrapper scripts.
 
-### [5/8] Updating OpenClaw Package
+### [5/9] Updating OpenClaw Package
 
 - Installs build dependencies: `libvips` (for sharp) and `binutils` (for native builds)
 - Creates `ar → llvm-ar` symlink if missing
-- Runs `npm install -g openclaw@latest` — environment variables from Step 4 are inherited, enabling native modules (sharp, `@discordjs/opus`, etc.) to build correctly
+- Runs `npm install -g openclaw@latest`
 - On failure, prints a warning and continues
 
-### [6/8] Updating clawhub (skill manager)
+### [6/9] Building sharp (image processing)
+
+Runs `build-sharp.sh` to ensure the sharp native module is built. If sharp was already compiled successfully during Step 5's `npm install`, this step detects it and skips the rebuild.
+
+### [7/9] Updating clawhub (skill manager)
 
 Installs or updates `clawhub`, the CLI tool for searching and installing OpenClaw skills.
 
 - If `clawhub` is not installed, installs it via `npm install -g clawdhub`
-- On Node.js v24+ in Termux, the `undici` package is not bundled with Node.js. If `undici` is missing, it's installed directly into clawhub's directory (`$(npm root -g)/clawdhub`)
-- Migrates skills from `~/skills/` to `~/.openclaw/workspace/skills/` if they were installed before `CLAWDHUB_WORKDIR` was configured. Existing skills at the correct location are preserved
-- All operations are non-critical — failures print a warning but don't stop the update
+- On Node.js v24+ in Termux, the `undici` package is not bundled with Node.js. If `undici` is missing, it's installed directly into clawhub's directory
+- Migrates skills from `~/skills/` to `~/.openclaw/workspace/skills/` if installed before `CLAWDHUB_WORKDIR` was configured
+- All operations are non-critical
 
-### [7/8] Updating code-server (IDE)
+### [8/9] Updating code-server (IDE)
 
-Runs `install-code-server.sh` in `update` mode to install or update code-server. If already installed and up to date, this step is skipped. See [Step 6/8 of the installation flow](#68-code-server-installation--scriptsinstall-code-serversh) for details on the workarounds applied. This step is non-critical — failure prints a warning but does not stop the update.
+Runs `install-code-server.sh` in `update` mode to install or update code-server. If already installed and up to date, this step is skipped. This step is non-critical — failure prints a warning but does not stop the update.
 
-### [8/8] Building sharp (image processing)
+### [9/9] Installing OpenCode + oh-my-opencode
 
-Runs `build-sharp.sh` to ensure the sharp native module is built. If sharp was already compiled successfully during Step 5's `npm install`, this step detects it and skips the rebuild.
+Runs `install-opencode.sh` to install or update OpenCode and oh-my-opencode. Requires glibc architecture — skipped on Bionic installations that failed migration. This step is non-critical.
 
 </details>
 
 ## Bonus: AI CLI Tools on Your Phone
 
-The compatibility patches included in this project fix Termux's native build environment, enabling popular AI CLI tools to install and run:
+The glibc environment installed by this project provides a standard Linux runtime, enabling popular AI CLI tools to install and run:
 
 | Tool | Install |
 |------|---------|
