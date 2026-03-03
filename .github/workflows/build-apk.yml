@@ -61,6 +61,12 @@ jobs:
         if: steps.gradle.outputs.has_gradle == 'true'
         run: yes | sdkmanager --licenses || true
 
+      - name: Install Android SDK platform and build-tools
+        if: steps.gradle.outputs.has_gradle == 'true'
+        run: |
+          sdkmanager "platforms;android-34" "build-tools;34.0.0"
+          echo "ANDROID_HOME=${ANDROID_SDK_ROOT:-$ANDROID_HOME}" >> $GITHUB_ENV
+
       - name: Grant execute permission for Gradle wrapper (root)
         if: steps.gradle.outputs.has_gradle == 'true' && steps.gradle.outputs.project_dir == '.'
         run: chmod +x ./gradlew
@@ -91,3 +97,4 @@ jobs:
           path: |
             ${{ steps.gradle.outputs.project_dir }}/app/build/outputs/apk/debug/*.apk
             ${{ steps.gradle.outputs.project_dir }}/app/build/outputs/apk/release/*.apk
+          if-no-files-found: warn
