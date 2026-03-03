@@ -1,5 +1,4 @@
 # Build Android APK in CI — 无需在本地安装 Android SDK
-# 仓库需包含 Gradle 工程（含 gradlew 及 build.gradle）
 name: Build APK
 
 on:
@@ -17,15 +16,35 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v4
 
-      - name: Check for Gradle project
+      - name: Locate Gradle project
         id: gradle
         run: |
-          if [ -f gradlew ]; then echo "has_gradle=true" >> $GITHUB_OUTPUT; else echo "has_gradle=false" >> $GITHUB_OUTPUT; fi
+          if [ -f gradlew ]; then
+            echo "has_gradle=true" >> $GITHUB_OUTPUT
+            echo "project_dir=." >> $GITHUB_OUTPUT
+          elif [ -f android-app/build.gradle.kts ] && [ -f android-app/gradlew ]; then
+            echo "has_gradle=true" >> $GITHUB_OUTPUT
+            echo "project_dir=android-app" >> $GITHUB_OUTPUT
+          else
+            echo "has_gradle=false" >> $GITHUB_OUTPUT
+            echo "project_dir=." >> $GITHUB_OUTPUT
+          fi
 
       - name: No Android project (skip build)
         if: steps.gradle.outputs.has_gradle != 'true'
         run: |
-          echo "::notice title=No Android project::此仓库暂无 gradlew。添加 Android 应用模块后即可在此构建 APK，当前跳过构建并视为通过。"
+          echo "::notice title=No Android project::此仓库暂无 Gradle 工程。当前跳过构建并视为通过。"
+
+      - name: Ensure Gradle wrapper (android-app)
+        if: steps.gradle.outputs.has_gradle == 'true' && steps.gradle.outputs.project_dir == 'android-app'
+        run: |
+          if [ ! -f android-app/gradle/wrapper/gradle-wrapper.jar ]; then
+            curl -sL https://services.gradle.org/distributions/gradle-8.4-bin.zip -o gradle.zip
+            unzip -q gradle.zip
+            cp gradle-8.4/gradle/wrapper/gradle-wrapper.jar android-app/gradle/wrapper/
+            rm -rf gradle.zip gradle-8.4
+          fi
+          chmod +x android-app/gradlew
 
       - name: Set up JDK 17
         if: steps.gradle.outputs.has_gradle == 'true'
@@ -42,18 +61,22 @@ jobs:
         if: steps.gradle.outputs.has_gradle == 'true'
         run: yes | sdkmanager --licenses || true
 
-      - name: Grant execute permission for Gradle wrapper
-        if: steps.gradle.outputs.has_gradle == 'true'
+      - name: Grant execute permission for Gradle wrapper (root)
+        if: steps.gradle.outputs.has_gradle == 'true' && steps.gradle.outputs.project_dir == '.'
         run: chmod +x ./gradlew
 
       - name: Build Debug APK
         if: steps.gradle.outputs.has_gradle == 'true'
-        run: ./gradlew assembleDebug --no-daemon --stacktrace
+        run: |
+          cd ${{ steps.gradle.outputs.project_dir }}
+          ./gradlew assembleDebug --no-daemon --stacktrace
 
       - name: Build Release APK
         if: steps.gradle.outputs.has_gradle == 'true'
         continue-on-error: true
-        run: ./gradlew assembleRelease --no-daemon --stacktrace
+        run: |
+          cd ${{ steps.gradle.outputs.project_dir }}
+          ./gradlew assembleRelease --no-daemon --stacktrace
         env:
           ORG_GRADLE_PROJECT_android.injected.signing.store.file: ${{ secrets.KEYSTORE_PATH }}
           ORG_GRADLE_PROJECT_android.injected.signing.store.password: ${{ secrets.KEYSTORE_PASSWORD }}
@@ -66,5 +89,5 @@ jobs:
         with:
           name: apk-outputs
           path: |
-            **/build/outputs/apk/debug/*.apk
-            **/build/outputs/apk/release/*.apk
+            ${{ steps.gradle.outputs.project_dir }}/app/build/outputs/apk/debug/*.apk
+            ${{ steps.gradle.outputs.project_dir }}/app/build/outputs/apk/release/*.apk

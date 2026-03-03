@@ -9,3 +9,10 @@ node_modules/
 docs/plan/
 .issues
 
+# Android / Gradle
+android-app/build/
+android-app/app/build/
+android-app/.gradle/
+*.iml
+local.properties
+
