@@ -35,23 +35,23 @@ jobs:
         run: |
           echo "::notice title=No Android project::此仓库暂无 Gradle 工程。当前跳过构建并视为通过。"
 
-      - name: Ensure Gradle wrapper (android-app)
-        if: steps.gradle.outputs.has_gradle == 'true' && steps.gradle.outputs.project_dir == 'android-app'
-        run: |
-          if [ ! -f android-app/gradle/wrapper/gradle-wrapper.jar ]; then
-            curl -sL https://services.gradle.org/distributions/gradle-8.4-bin.zip -o gradle.zip
-            unzip -q gradle.zip
-            cp gradle-8.4/gradle/wrapper/gradle-wrapper.jar android-app/gradle/wrapper/
-            rm -rf gradle.zip gradle-8.4
-          fi
-          chmod +x android-app/gradlew
-
       - name: Set up JDK 17
         if: steps.gradle.outputs.has_gradle == 'true'
         uses: actions/setup-java@v4
         with:
           distribution: 'temurin'
           java-version: '17'
+
+      - name: Ensure Gradle wrapper (android-app)
+        if: steps.gradle.outputs.has_gradle == 'true' && steps.gradle.outputs.project_dir == 'android-app'
+        run: |
+          if [ ! -f android-app/gradle/wrapper/gradle-wrapper.jar ]; then
+            curl -sL https://services.gradle.org/distributions/gradle-8.4-bin.zip -o gradle.zip
+            unzip -q gradle.zip
+            cd android-app && ../gradle-8.4/bin/gradle wrapper --gradle-version 8.4 && cd ..
+            rm -rf gradle.zip gradle-8.4
+          fi
+          chmod +x android-app/gradlew
 
       - name: Set up Android SDK
         if: steps.gradle.outputs.has_gradle == 'true'
