@@ -22,7 +22,7 @@ jobs:
         with:
           distribution: 'temurin'
           java-version: '17'
-          cache: 'gradle'
+          # 不使用 cache: 'gradle'，避免仓库暂无 Gradle 时缓存步骤报错
 
       - name: Set up Android SDK
         uses: android-actions/setup-android@v3
