@@ -1,0 +1,56 @@
+# Build Android APK in CI — 无需在本地安装 Android SDK
+# 仓库需包含 Gradle 工程（含 gradlew 及 build.gradle）
+name: Build APK
+
+on:
+  push:
+    branches: [main, master]
+  pull_request:
+    branches: [main, master]
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up JDK 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: 'temurin'
+          java-version: '17'
+          cache: 'gradle'
+
+      - name: Set up Android SDK
+        uses: android-actions/setup-android@v3
+
+      - name: Accept Android SDK licenses
+        run: yes | sdkmanager --licenses || true
+
+      - name: Grant execute permission for Gradle wrapper
+        run: chmod +x ./gradlew
+
+      # 先构建 Debug APK（无需签名，适合 CI 直接下载）
+      - name: Build Debug APK
+        run: ./gradlew assembleDebug --no-daemon --stacktrace
+
+      # 构建 Release APK（未配置签名时会失败，但不影响上传 Debug APK）
+      - name: Build Release APK
+        continue-on-error: true
+        run: ./gradlew assembleRelease --no-daemon --stacktrace
+        env:
+          ORG_GRADLE_PROJECT_android.injected.signing.store.file: ${{ secrets.KEYSTORE_PATH }}
+          ORG_GRADLE_PROJECT_android.injected.signing.store.password: ${{ secrets.KEYSTORE_PASSWORD }}
+          ORG_GRADLE_PROJECT_android.injected.signing.key.alias: ${{ secrets.KEY_ALIAS }}
+          ORG_GRADLE_PROJECT_android.injected.signing.key.password: ${{ secrets.KEY_PASSWORD }}
+
+      - name: Upload APK artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: apk-outputs
+          path: |
+            **/build/outputs/apk/debug/*.apk
+            **/build/outputs/apk/release/*.apk
